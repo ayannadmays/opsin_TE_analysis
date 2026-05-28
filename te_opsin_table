@@ -1,0 +1,97 @@
+# index genome and make table with chromosome sizes
+samtools faidx Hydra_105_v3_genomic.fna
+cut -f1,2 Hydra_105_v3_genomic.fna.fai > genome.sizes
+
+#get list of Rachel's opsins from genomic.gff file
+cat << 'EOF' > opsin_loc_ids.txt
+LOC105848280
+LOC124816941
+LOC101235298
+LOC101234858
+LOC101235116
+LOC101236896
+LOC105844650
+LOC105846227
+LOC124806594
+LOC105848360
+LOC101235476
+LOC101234777
+LOC100213039
+LOC101234360
+LOC101237418
+LOC101241511
+LOC100201535
+LOC100205142
+LOC100203903
+LOC124807954
+LOC105846611
+LOC105848929
+LOC124808278
+LOC101236289
+LOC105843965
+LOC124810357
+LOC105848251
+LOC124812709
+LOC124814107
+LOC124813541
+LOC100206297
+LOC124815639
+LOC105847721
+LOC100213665
+LOC101241514
+LOC101236169
+LOC105846852
+LOC105846757
+LOC105844139
+LOC105847478
+LOC124816164
+LOC105847534
+LOC105844504
+LOC105847123
+LOC105844887
+LOC124815466
+EOF
+
+#get gene rows from GFF
+grep -F -f opsin_loc_ids.txt genomic.gff | \
+  awk '$3=="gene"' | \
+  awk '{
+    match($9, /Name=([^;]+)/, nm);
+    print $1"\t"$4"\t"$5"\t"nm[1]"\t"$7
+  }' > found_opsins.bed
+
+#make 50kb windows of opsins
+bedtools slop \
+  -i found_opsins.bed \
+  -g genome.sizes \
+  -b 50000 \
+  > opsin_windows_50kb.bed
+
+#clean and sort repeatmasker bed file
+awk 'BEGIN{OFS="\t"} {print $1, $2, $3, $11}' hydra_105_repeats.bed > TEs.clean.bed
+sort -k1,1 -k2,2n TEs.clean.bed > TEs.sorted.bed
+
+#get TE coverage in windows
+bedtools merge -i TEs.sorted.bed > TEs.merged.bed
+
+bedtools coverage \
+  -a opsin_windows_50kb.bed \
+  -b TEs.merged.bed \
+  > opsin_TE_coverage.txt
+
+#get coverage at family level
+cut -f4 TEs.sorted.bed | sort -u > te_families.txt
+> opsin_family_coverage.txt
+
+while read family; do
+  awk -v fam="$family" '$4 == fam' TEs.sorted.bed > tmp_family.bed
+  bedtools merge -i tmp_family.bed > tmp_family_merged.bed
+
+  bedtools coverage \
+    -a opsin_windows_50kb.bed \
+    -b tmp_family_merged.bed \
+    | awk -v fam="$family" 'BEGIN{OFS="\t"} {print $4, fam, $9*100}' \
+    >> opsin_family_coverage.txt
+
+done < te_families.txt
+rm tmp_family.bed tmp_family_merged.bed
