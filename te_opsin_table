@@ -52,7 +52,7 @@ LOC105844887
 LOC124815466
 EOF
 
-#get gene rows from GFF
+#get genes only from GFF
 grep -F -f opsin_loc_ids.txt genomic.gff | \
   awk '$3=="gene"' | \
   awk '{
@@ -95,3 +95,155 @@ while read family; do
 
 done < te_families.txt
 rm tmp_family.bed tmp_family_merged.bed
+
+
+
+######## R Script #############
+
+library(tidyverse)
+
+opsin <- read_tsv("opsin_family_coverage.txt",
+                  col_names = c("gene", "family", "pct"))
+genome <- read_tsv("genome_family_coverage.txt",
+                   col_names = c("chrom", "start", "end", "family", "pct"))
+opsin_total <- read_tsv("opsin_TE_coverage.txt",
+                        col_names = c("chrom", "start", "end", "gene", "strand",
+                                      "n_features", "bp_covered", "window_size", "frac")) %>%
+  mutate(pct = frac * 100)
+
+#give repeat landscape color palette and map to family names in file, need to find a better way to do this
+te_colors <- c(
+  "ClassI"="#FFAA00","ClassII"="#FFBB33","ClassIII/Helitron"="#FFCC66",
+  "DNA"="#f3331b","DNA/Academ"="#f33f22","DNA/CACTA"="#f4512e",
+  "DNA/CMC"="#f45935","DNA/Crypton"="#f4613b","DNA/Dada"="#f57048",
+  "DNA/Ginger"="#f46842","DNA/Harbinger"="#f5764f","DNA/hAT"="#f57d55",
+  "DNA/IS3EU"="#f58045","DNA/Kolobok"="#f58350","DNA/Maverick"="#f5835c",
+  "DNA/Merlin"="#f68a63","DNA/MULE"="#f59658","DNA/Mutator"="#f59060",
+  "DNA/P"="#f59b63","DNA/PIF"="#f7a27d","DNA/PiggyBac"="#f5a078",
+  "DNA/Sola"="#f59770","DNA/TcMar"="#f69670","DNA/Zator"="#f7a890",
+  "DNA/Zisupton"="#fad0bd","LINE"="#2e158f","LINE/CR1"="#170088",
+  "LINE/CRE"="#3e2897","LINE/Dong"="#4d399f","LINE/I"="#5a4ea0",
+  "LINE/L1"="#594aa7","LINE/L2"="#665cae","LINE/Penelope"="#7f6bbf",
+  "LINE/Proto2"="#8a7fd0","LINE/R1"="#888ec6","LINE/R2"="#9eb2d5",
+  "LINE/Rex"="#a8c4dd","LINE/RTE"="#c5d8fd","LTR"="#186310",
+  "LTR/BEL"="#27711f","LTR/Copia"="#367f2d","LTR/DIRS"="#448e3b",
+  "LTR/ERV"="#3e8f3c","LTR/ERV1"="#529d49","LTR/ERVK"="#5fae55",
+  "LTR/Gypsy"="#4fae50","LTR/Ngaro"="#50b15b","LTR/Pao"="#4fae50",
+  "MITE"="#6ebc67","nMITE"="#6ebc67","nLTR"="#69c36a",
+  "nLTR/DIRS"="#5fbf5a","nLTR/LINE"="#66CC66","nLTR/PLE"="#99ec95",
+  "nLTR/SINE"="#b2d7e4","Other/DNA_virus"="#d0d0d0",
+  "PLE/Chlamys"="#b2d7e4","PLE/Hydra"="#b2d7e4","PLE/Naiad"="#b2d7e4",
+  "RC/Helitron"="#f720fa","Retroposon/RTE"="#3e2897","Satellite"="#b0b0b0",
+  "Simple_repeat"="#909090","SINE"="#9e23eb","SINE/5S"="#a539ec",
+  "SINE/Alu"="#b159ef","SINE/B2"="#b373f0","SINE/B4"="#b58cf1",
+  "SINE/ID"="#baabf2","SINE/U"="#dfcdf7","unknown"="#707070"
+)
+
+family_to_color_key <- function(fam) {
+  case_when(
+    str_detect(fam, "ClassI")            ~ "ClassI",
+    str_detect(fam, "ClassII")           ~ "ClassII",
+    str_detect(fam, "ClassIII|Helitron") ~ "ClassIII/Helitron",
+    str_detect(fam, "DNA/Academ")        ~ "DNA/Academ",
+    str_detect(fam, "DNA/CACTA")         ~ "DNA/CACTA",
+    str_detect(fam, "DNA/CMC")           ~ "DNA/CMC",
+    str_detect(fam, "DNA/Crypton")       ~ "DNA/Crypton",
+    str_detect(fam, "DNA/Dada")          ~ "DNA/Dada",
+    str_detect(fam, "DNA/Ginger")        ~ "DNA/Ginger",
+    str_detect(fam, "DNA/Harbinger")     ~ "DNA/Harbinger",
+    str_detect(fam, "DNA/hAT")           ~ "DNA/hAT",
+    str_detect(fam, "DNA/IS3EU")         ~ "DNA/IS3EU",
+    str_detect(fam, "DNA/Kolobok")       ~ "DNA/Kolobok",
+    str_detect(fam, "DNA/Maverick")      ~ "DNA/Maverick",
+    str_detect(fam, "DNA/Merlin")        ~ "DNA/Merlin",
+    str_detect(fam, "DNA/MULE")          ~ "DNA/MULE",
+    str_detect(fam, "DNA/Mutator")       ~ "DNA/Mutator",
+    str_detect(fam, "DNA/P")             ~ "DNA/P",
+    str_detect(fam, "DNA/PIF")           ~ "DNA/PIF",
+    str_detect(fam, "DNA/PiggyBac")      ~ "DNA/PiggyBac",
+    str_detect(fam, "DNA/Sola")          ~ "DNA/Sola",
+    str_detect(fam, "DNA/TcMar")         ~ "DNA/TcMar",
+    str_detect(fam, "DNA/Zator")         ~ "DNA/Zator",
+    str_detect(fam, "DNA/Zisupton")      ~ "DNA/Zisupton",
+    str_detect(fam, "^DNA$")             ~ "DNA",
+    str_detect(fam, "LINE/CR1")          ~ "LINE/CR1",
+    str_detect(fam, "LINE/CRE")          ~ "LINE/CRE",
+    str_detect(fam, "LINE/Dong")         ~ "LINE/Dong",
+    str_detect(fam, "LINE/I")            ~ "LINE/I",
+    str_detect(fam, "LINE/L1")           ~ "LINE/L1",
+    str_detect(fam, "LINE/L2")           ~ "LINE/L2",
+    str_detect(fam, "LINE/Penelope")     ~ "LINE/Penelope",
+    str_detect(fam, "LINE/Proto2")       ~ "LINE/Proto2",
+    str_detect(fam, "LINE/R1")           ~ "LINE/R1",
+    str_detect(fam, "LINE/R2")           ~ "LINE/R2",
+    str_detect(fam, "LINE/Rex")          ~ "LINE/Rex",
+    str_detect(fam, "LINE/RTE")          ~ "LINE/RTE",
+    str_detect(fam, "^LINE$")            ~ "LINE",
+    str_detect(fam, "LTR/BEL")          ~ "LTR/BEL",
+    str_detect(fam, "LTR/Copia")        ~ "LTR/Copia",
+    str_detect(fam, "LTR/DIRS")         ~ "LTR/DIRS",
+    str_detect(fam, "LTR/ERV1")         ~ "LTR/ERV1",
+    str_detect(fam, "LTR/ERVK")         ~ "LTR/ERVK",
+    str_detect(fam, "LTR/ERV")          ~ "LTR/ERV",
+    str_detect(fam, "LTR/Gypsy")        ~ "LTR/Gypsy",
+    str_detect(fam, "LTR/Ngaro")        ~ "LTR/Ngaro",
+    str_detect(fam, "LTR/Pao")          ~ "LTR/Pao",
+    str_detect(fam, "^LTR$")            ~ "LTR",
+    str_detect(fam, "nMITE")            ~ "nMITE",
+    str_detect(fam, "MITE")             ~ "MITE",
+    str_detect(fam, "nLTR/DIRS")        ~ "nLTR/DIRS",
+    str_detect(fam, "nLTR/LINE")        ~ "nLTR/LINE",
+    str_detect(fam, "nLTR/PLE")         ~ "nLTR/PLE",
+    str_detect(fam, "nLTR/SINE")        ~ "nLTR/SINE",
+    str_detect(fam, "nLTR")             ~ "nLTR",
+    str_detect(fam, "PLE/Chlamys")      ~ "PLE/Chlamys",
+    str_detect(fam, "PLE/Hydra")        ~ "PLE/Hydra",
+    str_detect(fam, "PLE/Naiad")        ~ "PLE/Naiad",
+    str_detect(fam, "RC/Helitron")      ~ "RC/Helitron",
+    str_detect(fam, "Retroposon/RTE")   ~ "Retroposon/RTE",
+    str_detect(fam, "Satellite")        ~ "Satellite",
+    str_detect(fam, "Simple_repeat")    ~ "Simple_repeat",
+    str_detect(fam, "SINE/5S")          ~ "SINE/5S",
+    str_detect(fam, "SINE/Alu")         ~ "SINE/Alu",
+    str_detect(fam, "SINE/B2")          ~ "SINE/B2",
+    str_detect(fam, "SINE/B4")          ~ "SINE/B4",
+    str_detect(fam, "SINE/ID")          ~ "SINE/ID",
+    str_detect(fam, "SINE/U")           ~ "SINE/U",
+    str_detect(fam, "^SINE$")           ~ "SINE",
+    str_detect(fam, "unknown")          ~ "unknown",
+    TRUE                                ~ "unknown"
+  )
+}
+
+#order opsins by how much TE coverage they have
+gene_order <- opsin %>%
+  filter(family %in% focal_families) %>%
+  group_by(gene) %>%
+  summarize(total = sum(pct)) %>%
+  arrange(total) %>%
+  pull(gene)
+
+#make plot
+opsin %>%
+  filter(family %in% focal_families) %>%
+  mutate(
+    color_key = family_to_color_key(family),
+    gene = factor(gene, levels = gene_order)
+  ) %>%
+  ggplot(aes(x = gene, y = pct, fill = color_key)) +
+  geom_col() +
+  scale_fill_manual(values = te_colors, name = "TE family") +
+  scale_x_discrete(limits = gene_order) +
+  labs(
+    x = NULL,
+    y = "% 50kb window covered",
+    title = "TE family coverage around opsin genes"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 7),
+    legend.text  = element_text(size = 7),
+    legend.key.size = unit(0.4, "cm")
+  )
+
+ggsave("opsin_stacked_family_colored.pdf", width = 12, height = 6)
