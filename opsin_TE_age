@@ -1,0 +1,201 @@
+#make bed files of background genes excluding opsins
+########################################
+set -euo pipefail
+
+module load miniconda3
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate myenv
+
+# 105 
+echo "=== 105: checking for gene_biotype tag ==="
+head -3 <(awk -F'\t' '$3=="gene"' GCF_022113875.1_Hydra_105_v3_genomic.gff)
+
+echo ""
+echo "If the lines above contain gene_biotype=protein_coding, proceeding..."
+echo ""
+
+awk -F'\t' 'BEGIN{OFS="\t"} $3=="gene" && $9 ~ /gene_biotype=protein_coding(;|$)/ \
+  {print $1, $4-1, $5, $9, ".", $7}' \
+  GCF_022113875.1_Hydra_105_v3_genomic.gff \
+  | sort -k1,1 -k2,2n > 105_protein_coding_genes.sorted.bed
+
+cut -f4 105_opsins.sorted.bed > 105_opsin_LOCs_derived.txt
+
+grep -vFf 105_opsin_LOCs_derived.txt 105_protein_coding_genes.sorted.bed \
+  > 105_protein_coding_genes_no_opsins.sorted.bed || true
+
+echo "105 done: $(wc -l < 105_protein_coding_genes_no_opsins.sorted.bed) background genes"
+
+
+# Viri
+echo "=== Viri ==="
+
+awk -F'\t' 'BEGIN{OFS="\t"} $3=="gene" && $9 ~ /gene_biotype=protein_coding(;|$)/ \
+  {print $1, $4-1, $5, $9, ".", $7}' \
+  GCF_964215635.1_jhHydViri1.1_genomic.gff \
+  | sort -k1,1 -k2,2n > Viri_protein_coding_genes.sorted.bed
+
+cut -f4 Hviri_opsin.sorted.bed > Viri_opsin_LOCs_derived.txt
+
+grep -vFf Viri_opsin_LOCs_derived.txt Viri_protein_coding_genes.sorted.bed \
+  > Viri_protein_coding_genes_no_opsins.sorted.bed || true
+
+echo "Viri done: $(wc -l < Viri_protein_coding_genes_no_opsins.sorted.bed) background genes"
+
+echo ""
+echo "Both genic background beds ready. You can now run te_kimura_opsin_pipeline.sh"
+
+#make table with genic background and opsin TEs
+##############################################################################
+
+# per-TE-copy Kimura divergence (CpG-corrected), labeled "opsin_associated" (flanking opsin
+# genes), "genic_background" (flanking other protein-coding genes, opsin
+# zone excluded), or "nongenic_background" (outside any gene-flanking
+# window)
+# Requires, per genome, protein-coding-genes bed with opsins excluded
+
+#SBATCH -p 128x24
+#SBATCH -J TE_Kimura_Opsin
+#SBATCH --mail-user=useremail@ucsc.edu
+#SBATCH --mail-type=ALL
+#SBATCH -o TE_kimura_opsin_%j.out
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 24:00:00
+#SBATCH --mem=8G
+
+set -euo pipefail
+
+module load miniconda3
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate myenv   # bedtools must be on PATH
+
+
+# CONFIG — one entry per genome
+
+PREFIXES=(105 Viri)
+
+declare -A ALIGN_FILE=(
+  [105]="GCF_022113875.1_Hydra_105_v3_genomic.fna.align"
+  [Viri]="GCF_964215635.1_jhHydViri1.1_genomic.fna.align"
+)
+
+declare -A OPSIN_BED=(
+  [105]="105_opsins.sorted.bed"
+  [Viri]="Hviri_opsin.sorted.bed"
+)
+
+# Protein-coding gene beds with opsins ALREADY EXCLUDED (see grep -vFf step
+# in the pipeline notes) — used to build the genic background control.
+declare -A GENIC_BED=(
+  [105]="105_protein_coding_genes_no_opsins.sorted.bed"
+  [Viri]="Viri_protein_coding_genes_no_opsins.sorted.bed"
+)
+
+declare -A GENOME_INFO=(
+  [105]="hydra_105_genome_info"
+  [Viri]="hydra_viri_genome_info"
+)
+
+FLANK_SIZE=50000   # bp; change to 10000 if you want to match the paper's window
+
+# TE classes to keep — same list your original rmsk filtering step used
+KEEP_CLASSES="DNA|LINE|MITE|nMITE|LTR|ClassI|nLTR|SINE|RC|PLE|ClassII|unknown"
+
+OUT="all_species_TE_kimura_long.tsv"
+> "$OUT"
+echo -e "species\tchrom\tstart\tend\tclass\tkimura_div\tcategory" >> "$OUT"
+
+
+# Per-genome loop
+
+for PREFIX in "${PREFIXES[@]}"; do
+
+  echo "=== Processing ${PREFIX} ==="
+
+  KIMURA_RAW="${PREFIX}_kimura_raw.tsv"
+  KIMURA_BED="${PREFIX}_rmsk_kimura.sorted.bed"
+  UPSTREAM_BED="${PREFIX}_opsins.upstream$(( FLANK_SIZE / 1000 ))kb.sorted.bed"
+  DOWNSTREAM_BED="${PREFIX}_opsins.downstream$(( FLANK_SIZE / 1000 ))kb.sorted.bed"
+  OPSIN_ZONE="${PREFIX}_opsin_zone.bed"
+  OPSIN_TSV="${PREFIX}_TE_opsin.tsv"
+  ALL_TSV="${PREFIX}_TE_all.tsv"
+  GENIC_UP="${PREFIX}_genic.upstream$(( FLANK_SIZE / 1000 ))kb.sorted.bed"
+  GENIC_DOWN="${PREFIX}_genic.downstream$(( FLANK_SIZE / 1000 ))kb.sorted.bed"
+  GENIC_ZONE="${PREFIX}_genic_background_zone.bed"
+  GENIC_TSV="${PREFIX}_TE_genic_background.tsv"
+
+  
+  # 1. Parse per-copy, CpG-corrected Kimura divergence from the .align file. Blocks with no "Kimura (with divCpGMod)" line — simple repeats, low complexity, rRNA/tRNA — are skipped automatically, since they never get scored against a substitution matrix. Class/name field position shifts on the complement strand (extra "C" token)
+  
+  awk '
+  {
+    if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9.]+$/ && $6 ~ /^[0-9]+$/) {
+      chrom=$5; start=$6-1; end=$7
+      namefield = ($9=="C") ? $10 : $9
+      split(namefield, nc, "#")
+      class = nc[2]
+      kimura = ""
+      next
+    }
+    if ($0 ~ /Kimura \(with divCpGMod\)/) {
+      split($0, kv, "=")
+      kimura = kv[2]
+      gsub(/^[ \t]+|[ \t]+$/, "", kimura)
+      if (class != "") {
+        split(class, cc, "/")
+        print chrom"\t"start"\t"end"\t"cc[1]"\t"kimura
+      }
+    }
+  }' "${ALIGN_FILE[$PREFIX]}" > "$KIMURA_RAW"
+
+  awk -F'\t' -v keep="$KEEP_CLASSES" \
+    'BEGIN{n=split(keep,k,"|"); for(i=1;i<=n;i++) want[k[i]]=1} want[$4]' \
+    "$KIMURA_RAW" | sort -k1,1 -k2,2n > "$KIMURA_BED"
+
+  
+  # 2. Opsin flanking zone 
+  
+  bedtools flank -i "${OPSIN_BED[$PREFIX]}" -g "${GENOME_INFO[$PREFIX]}" \
+    -l "$FLANK_SIZE" -r 0 -s | sort -k1,1 -k2,2n > "$UPSTREAM_BED"
+
+  bedtools flank -i "${OPSIN_BED[$PREFIX]}" -g "${GENOME_INFO[$PREFIX]}" \
+    -l 0 -r "$FLANK_SIZE" -s | sort -k1,1 -k2,2n > "$DOWNSTREAM_BED"
+
+  cat "$UPSTREAM_BED" "$DOWNSTREAM_BED" "${OPSIN_BED[$PREFIX]}" \
+    | cut -f1-3 | sort -k1,1 -k2,2n | bedtools merge -i - > "$OPSIN_ZONE"
+
+  # 3. Genic background zone — The opsin zone is subtracted out so a TE near both an opsin and a random gene only counts toward "opsin_associated"
+  
+  bedtools flank -i "${GENIC_BED[$PREFIX]}" -g "${GENOME_INFO[$PREFIX]}" \
+    -l "$FLANK_SIZE" -r 0 -s | sort -k1,1 -k2,2n > "$GENIC_UP"
+
+  bedtools flank -i "${GENIC_BED[$PREFIX]}" -g "${GENOME_INFO[$PREFIX]}" \
+    -l 0 -r "$FLANK_SIZE" -s | sort -k1,1 -k2,2n > "$GENIC_DOWN"
+
+  cat "$GENIC_UP" "$GENIC_DOWN" "${GENIC_BED[$PREFIX]}" \
+    | cut -f1-3 | sort -k1,1 -k2,2n | bedtools merge -i - \
+    | bedtools subtract -a - -b "$OPSIN_ZONE" \
+    | sort -k1,1 -k2,2n | bedtools merge -i - > "$GENIC_ZONE"
+
+  # 4. Label each TE copy: opsin_associated vs genic_background vs all_TE; All three are mutually exclusive — "all_TE" excludes the opsin zone too, so every pairwise comparison is between independent sets of TE copies (required for a valid Wilcoxon/Kruskal-Wallis test).
+  
+  bedtools intersect -u -a "$KIMURA_BED" -b "$OPSIN_ZONE" \
+    | awk 'BEGIN{OFS="\t"}{print $0, "opsin_associated"}' > "$OPSIN_TSV"
+
+  bedtools intersect -u -a "$KIMURA_BED" -b "$GENIC_ZONE" \
+    | awk 'BEGIN{OFS="\t"}{print $0, "genic_background"}' > "$GENIC_TSV"
+
+  bedtools intersect -v -a "$KIMURA_BED" -b "$OPSIN_ZONE" \
+    | bedtools intersect -v -a - -b "$GENIC_ZONE" \
+    | awk 'BEGIN{OFS="\t"}{print $0, "nongenic_background"}' > "$ALL_TSV"
+
+  awk -v sp="$PREFIX" 'BEGIN{OFS="\t"}{print sp, $0}' "$ALL_TSV" >> "$OUT"
+  awk -v sp="$PREFIX" 'BEGIN{OFS="\t"}{print sp, $0}' "$OPSIN_TSV" >> "$OUT"
+  awk -v sp="$PREFIX" 'BEGIN{OFS="\t"}{print sp, $0}' "$GENIC_TSV" >> "$OUT"
+
+  echo "  $(wc -l < "$ALL_TSV") non-genic background, $(wc -l < "$OPSIN_TSV") opsin-associated, $(wc -l < "$GENIC_TSV") genic background"
+
+done
+
+echo "Done. Combined table: ${OUT}"
