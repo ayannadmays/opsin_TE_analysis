@@ -3,10 +3,29 @@
 set -euo pipefail
 
 module load miniconda3
-source $(conda info --base)/etc/profile.d/conda.sh
 conda activate myenv
 
 # 105 
+echo "=== 105: checking for gene_biotype tag ==="
+head -3 <(awk -F'\t' '$3=="gene"' GCF_022113875.1_Hydra_105_v3_genomic.gff)
+
+echo ""
+echo "If the lines above contain gene_biotype=protein_coding, proceeding..."
+echo ""
+
+awk -F'\t' 'BEGIN{OFS="\t"} $3=="gene" && $9 ~ /gene_biotype=protein_coding(;|$)/ \
+  {print $1, $4-1, $5, $9, ".", $7}' \
+  GCF_022113875.1_Hydra_105_v3_genomic.gff \
+  | sort -k1,1 -k2,2n > 105_protein_coding_genes.sorted.bed
+
+cut -f4 105_opsins.sorted.bed > 105_opsin_LOCs_derived.txt
+
+grep -vFf 105_opsin_LOCs_derived.txt 105_protein_coding_genes.sorted.bed \
+  > 105_protein_coding_genes_no_opsins.sorted.bed || true
+
+echo "105 done: $(wc -l < 105_protein_coding_genes_no_opsins.sorted.bed) background genes"
+
+# AEP
 echo "=== 105: checking for gene_biotype tag ==="
 head -3 <(awk -F'\t' '$3=="gene"' GCF_022113875.1_Hydra_105_v3_genomic.gff)
 
