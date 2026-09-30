@@ -1,0 +1,83 @@
+#!/bin/bash
+#SBATCH -p 128x24
+#SBATCH -J TE_Kimura_OpsinClade
+#SBATCH --mail-user=useremail@ucsc.edu
+#SBATCH --mail-type=ALL
+#SBATCH -o TE_kimura_opsin_clade_%j.out
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 02:00:00
+#SBATCH --mem=8G
+
+#must be run after the TE_kimura_opsin script
+#${PREFIX}_rmsk_kimura.sorted.bed        (step 1: per-copy Kimura)
+#${PREFIX}_TE_opsin.tsv                  (step 3: opsin_associated TEs)
+#${PREFIX}_TE_genic_background.tsv       (step 3: genic background TEs)
+# Output: all_species_TE_kimura_by_opsin.tsv
+##############################################################################
+
+set -euo pipefail
+
+module load miniconda3
+conda activate myenv 
+
+PREFIXES=(105 Viri AEP)
+
+# Column 4 of these beds must be the opsin ID used in opsin_clades.tsv
+declare -A OPSIN_BED=(
+  [105]="105_opsins.sorted.bed"
+  [Viri]="Hviri_opsin.sorted.bed"
+  [AEP]="HVAEP_opsins.sorted.bed"
+)
+#makes lookup table
+declare -A GENOME_INFO=(
+  [105]="hydra_105_genome_info"
+  [Viri]="hydra_viri_genome_info"
+  [AEP]="HvAEP_genome_info"
+)
+
+FLANK_SIZE=50000   # MUST match FLANK_SIZE in the original script
+
+OUT="all_species_TE_kimura_by_opsin.tsv"
+echo -e "species\tte_id\tchrom\tstart\tend\tclass\tkimura_div\tcategory\topsin_id" > "$OUT"
+
+##############################################################################
+# Per-genome loop
+##############################################################################
+for PREFIX in "${PREFIXES[@]}"; do
+
+  KIMURA_BED="${PREFIX}_rmsk_kimura.sorted.bed"
+  OPSIN_TSV="${PREFIX}_TE_opsin.tsv"
+  GENIC_TSV="${PREFIX}_TE_genic_background.tsv"
+  OPSIN_WIN="${PREFIX}_opsin_windows_named.bed"
+
+  ############################################################################
+  # 1. Per-opsin windows that KEEP the opsin ID, unmerged.
+  #    slop -b FLANK_SIZE = upstream flank + gene body + downstream flank,
+  #    the same footprint as the flank/cat/merge zone in the original script,
+  #    but one window per opsin.
+  ############################################################################
+  bedtools slop -i "${OPSIN_BED[$PREFIX]}" -g "${GENOME_INFO[$PREFIX]}" \
+    -b "$FLANK_SIZE" | cut -f1-4 | sort -k1,1 -k2,2n > "$OPSIN_WIN"
+
+  ############################################################################
+  # 2. TE x opsin-window pairs. TE (5 cols) + window (4 cols): $9 = opsin ID
+  ############################################################################
+  bedtools intersect -wa -wb -a "$KIMURA_BED" -b "$OPSIN_WIN" \
+    | awk -v sp="$PREFIX" 'BEGIN{OFS="\t"}
+        {print sp, $1":"$2"-"$3, $1, $2, $3, $4, $5, "opsin_associated", $9}' \
+    >> "$OUT"
+
+  ############################################################################
+  # 3. Genic background rows (reused from original), opsin_id = NA
+  #    GENIC_TSV cols: chrom start end class kimura category
+  ############################################################################
+  awk -v sp="$PREFIX" 'BEGIN{OFS="\t"}
+      {print sp, $1":"$2"-"$3, $1, $2, $3, $4, $5, $6, "NA"}' \
+    "$GENIC_TSV" >> "$OUT"
+
+  # Should match the original opsin-associated count
+  echo "  ${PREFIX}: $(wc -l < "$OPSIN_TSV") TEs in original; $(awk -F'\t' -v sp="$PREFIX" \
+    '$1==sp && $8=="opsin_associated"{print $2}' "$OUT" | sort -u | wc -l) here"
+
+done
